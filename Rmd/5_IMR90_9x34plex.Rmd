@@ -1,0 +1,221 @@
+---
+title: "5_IMR90_9x34plex"
+output: html_notebook
+---
+
+Down stream analysis of the dataset '5_IMR90_9x34plex'
+
+## setup
+
+```{r setup}
+library(tidyverse)
+library(ggforce)
+library(Seurat)
+library(tidyverse)
+source("~/R/use_function.R")
+```
+
+```{r}
+dcolor <- ggsci::scale_color_d3('category20')
+dfill <- ggsci::scale_fill_d3('category20')
+ccolor <- viridis::scale_color_viridis()
+style <- function(x,color,method='UMAP',axis=c(1,2),Theme=NULL,
+                  axis.text=FALSE,axis.title=FALSE,coord_fix =TRUE,
+                  palette=TRUE,title=NULL,
+                  legend=TRUE,scale_color_log10=FALSE,
+                  guide_pointSize=2.5,...) {
+  axis <- paste0(method,axis)
+  if(is.null(Theme)) Theme <- theme_bw
+  g <- ggplot() + Theme()
+  g <- g + geom_point(aes_(x=as.name(axis[1]),y=as.name(axis[2]),color=as.name(color)),x,...)
+  
+  if(coord_fix) {
+    g <- g + coord_fixed()
+  }
+  if(!axis.text) {
+    g <- g + theme(axis.text = element_blank(),axis.ticks = element_blank())
+  }
+  if(!axis.title) {
+    g <- g + theme(axis.title = element_blank())
+  }
+  if(is.null(title)) {
+    g <- g + ggtitle(method) 
+  }else if(!is.na(title)) {
+    g <- g + ggtitle(title) 
+  }
+  if(!legend) g <- g + theme(legend.position = 'none')
+  
+  if(scale_type(as.matrix(x[,color]))=='discrete' & !is.null(guide_pointSize)) {
+    g <- g + guides(color = guide_legend(override.aes = list(size=guide_pointSize)))
+  }
+  
+  if(palette) {
+    if(scale_type(as.matrix(x[,color]))=='discrete') {
+      g <- g + ggsci::scale_color_d3('category20')
+    }else{
+      if(scale_color_log10){
+        g <- g + viridis::scale_color_viridis(trans='log10')
+      }else{
+        g <- g + viridis::scale_color_viridis()
+      }
+    }
+  }
+  return(g)
+}
+tib2df <- function(tib,RowNames=1) {
+  rn <- pull(tib,all_of(RowNames))
+  df <- tib %>%
+    select(-RowNames) %>%
+    as.data.frame()
+  rownames(df) <- rn
+  return(df)
+}
+```
+
+
+## load data
+
+```{r}
+data <- tibble(sampleName = c('r1','r2'),
+               path1 = list.files(
+                 '5_IMR90_9x34plex/Raw/',
+                 full.names = T,pattern = 'PECAb'),
+               path2 = list.files(
+                 '5_IMR90_9x34plex/Raw/',
+                 full.names = T,pattern = 'FISH')) %>%
+  mutate(
+    IF  = map(path1,~{
+      .x %>% read_csv(show_col_types = F) %>% 
+        unite(cell,tileID,cellID,sep = '-',remove = F) %>%
+        .[,-(2:8)] %>% arrange(cell)
+      }),
+    FISH  = map(path2,~{
+      .x %>% read_csv(show_col_types = F) %>% 
+        unite(cell,tileID,cellID,sep = '-',remove = F) %>%
+        .[,-(2:8)] %>% arrange(cell)
+      }),
+    meta = map(path1,~{
+      .x %>% read_csv(show_col_types = F) %>% 
+        unite(cell,tileID,cellID,sep = '-',remove = F) %>%
+        .[,1:8] %>% arrange(cell)
+      }),
+    meta = map2(meta,IF,~mutate(.x,totalExp = rowSums(.y[,-1]))),
+    meta = map2(meta,FISH,~mutate(.x,totalCount = rowSums(.y[,-1]))),
+    )
+```
+
+
+## QC
+
+```{r}
+data %>%
+  select(-IF,-FISH) %>% unnest(meta) %>%
+  ggplot(aes(x,y,color=sampleName)) +
+    theme_void() +
+    geom_point(size=1) + 
+    facet_grid(~sampleName) + coord_fixed()
+```
+
+```{r}
+{data %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalExp)) + geom_violin() + geom_boxplot()}|
+{data %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalCount+1)) + geom_violin() + geom_boxplot() + scale_y_log10()}
+```
+
+
+```{r}
+dataf <- data %>%
+  mutate(
+    idx = map(meta,~{.x$totalExp > 0.02}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    FISH = map2(FISH,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]})
+    ) %>%
+  mutate(
+    idx = map(meta,~{.x$totalCount > 20}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    FISH = map2(FISH,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]})
+    ) %>%
+  mutate(
+    idx = map(IF,~{rowSums(.x[,-1]==0)==0}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    FISH = map2(FISH,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]}),
+    nCell = map(idx,sum) %>% unlist()
+    )
+
+{dataf %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalExp)) + geom_violin() + geom_boxplot()}|
+{dataf %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalCount)) + geom_violin() + geom_boxplot() + scale_y_log10()}
+
+dataf %>%  
+  ggplot(aes(sampleName,nCell)) + 
+  theme_classic() +
+  geom_bar(stat='identity') +
+  scale_x_discrete(limits=rev) +
+  theme(axis.title.y = element_blank()) +  
+  coord_flip() + theme(aspect.ratio = .35) 
+```
+
+
+```{r}
+X <- dataf %>% 
+  select(sampleName,IF) %>% unnest(IF) %>%
+  unite(Cell,sampleName,cell,sep = '-') %>%
+  tib2df() %>% scale() %>% asinh()
+p <- prcomp(X)
+um1 <- p$x[,2:6] %>%
+  uwot::umap(min_dist = 0.3,n_neighbors = 30,metric = 'cosine') %>%
+  as_tibble(rownames='Cell') %>% rename(UMAP1_IF = V1,  UMAP2_IF = V2)
+```
+
+```{r warning=F}
+idx <- dataf$FISH %>%
+  map(~{ colnames(.x)[-1][colSums(.x[,-1]>0)>200] }) %>%
+  do.call(intersect,.)
+mat <- dataf %>%
+  select(sampleName,FISH) %>% unnest(FISH) %>%
+  unite(Cell,sampleName,cell,sep = '-') %>%
+  select(all_of(c('Cell',idx))) %>%
+  tib2df() %>% t()
+seu <- CreateSeuratObject(mat,min.features = 20)
+seu <- NormalizeData(seu,scale.factor=500)
+seu <- ScaleData(seu)
+seu <- FindVariableFeatures(seu,nfeatures = nrow(seu))
+seu <- RunPCA(seu, verbose = FALSE)
+seu <- RunUMAP(seu, reduction = "pca", dims = 2:6, min.dist = .3)
+```
+
+```{r}
+um2 <- Embeddings(seu[['umap']]) %>%
+  as_tibble(rownames = 'Cell') %>%
+  rename(UMAP1_FISH=2,UMAP2_FISH=3)
+Metaum <- dataf %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  unite(Cell,sampleName,cell,sep = '-',remove = F) %>%
+  inner_join(um1,by='Cell') %>% 
+  inner_join(um2,by='Cell')
+tmp <- Metaum %>%
+  mutate(UMAP2_IF = UMAP2_IF-10)
+
+ggplot() + 
+  theme_void() +
+  geom_segment(aes(y = UMAP1_IF,x = UMAP2_IF, yend = UMAP1_FISH,xend = UMAP2_FISH, color = sampleName), tmp, size = .1,alpha = .5) + 
+  geom_point(aes(y = UMAP1_IF,x = UMAP2_IF, color = sampleName), tmp, size = 1) +
+  geom_point(aes(y = UMAP1_FISH,x = UMAP2_FISH, color = sampleName), tmp, size = 1) + coord_fixed() +
+  ggtitle(paste0(paste(rep(" ",17),collapse = ""),'IF',paste(rep(" ",40),collapse = ""),'FISH'))
+```
+
+```{r}
+sessionInfo()
+```
+
+
+

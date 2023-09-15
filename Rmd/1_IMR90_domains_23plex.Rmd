@@ -1,0 +1,200 @@
+---
+title: "1_IMR90_domains_23plex_analysis"
+output: html_notebook
+---
+
+Down stream analysis of the dataset '1_IMR90_domains_23plex'
+
+## setup
+
+```{r setup}
+library(ggforce)
+library(tidyverse)
+```
+
+```{r}
+dcolor <- ggsci::scale_color_d3('category20')
+dfill <- ggsci::scale_fill_d3('category20')
+ccolor <- viridis::scale_color_viridis()
+style <- function(x,color,method='UMAP',axis=c(1,2),Theme=NULL,
+                  axis.text=FALSE,axis.title=FALSE,coord_fix =TRUE,
+                  palette=TRUE,title=NULL,
+                  legend=TRUE,scale_color_log10=FALSE,
+                  guide_pointSize=2.5,...) {
+  axis <- paste0(method,axis)
+  if(is.null(Theme)) Theme <- theme_bw
+  g <- ggplot() + Theme()
+  g <- g + geom_point(aes_(x=as.name(axis[1]),y=as.name(axis[2]),color=as.name(color)),x,...)
+  
+  if(coord_fix) {
+    g <- g + coord_fixed()
+  }
+  if(!axis.text) {
+    g <- g + theme(axis.text = element_blank(),axis.ticks = element_blank())
+  }
+  if(!axis.title) {
+    g <- g + theme(axis.title = element_blank())
+  }
+  if(is.null(title)) {
+    g <- g + ggtitle(method) 
+  }else if(!is.na(title)) {
+    g <- g + ggtitle(title) 
+  }
+  if(!legend) g <- g + theme(legend.position = 'none')
+  
+  if(scale_type(as.matrix(x[,color]))=='discrete' & !is.null(guide_pointSize)) {
+    g <- g + guides(color = guide_legend(override.aes = list(size=guide_pointSize)))
+  }
+  
+  if(palette) {
+    if(scale_type(as.matrix(x[,color]))=='discrete') {
+      g <- g + ggsci::scale_color_d3('category20')
+    }else{
+      if(scale_color_log10){
+        g <- g + viridis::scale_color_viridis(trans='log10')
+      }else{
+        g <- g + viridis::scale_color_viridis()
+      }
+    }
+  }
+  return(g)
+}
+tib2df <- function(tib,RowNames=1) {
+  rn <- pull(tib,all_of(RowNames))
+  df <- tib %>%
+    select(-RowNames) %>%
+    as.data.frame()
+  rownames(df) <- rn
+  return(df)
+}
+```
+
+
+##  load data
+
+```{r}
+data <- tibble(
+  path = list.files('1_IMR90_domains_23plex/Raw/',full.names = T),
+  sampleName = paste(rep(c('G','S'),each=5),formatC(1:10,width = 2,flag = 0),sep = '-')
+  ) %>%
+  separate(sampleName,into=c('type','cellID'),remove = F) %>%
+  mutate(metric = map(path,read_csv,show_col_types=F)) %>%
+  select(-path) %>% unnest(metric) %>%
+  unite(Domain,sampleName,domainID,sep = '-',remove = F) 
+```
+
+```{r fig.width=12}
+tmp <- data %>%
+  gather(key=feature,value=exp,-(1:5)) %>%
+  separate(feature,into=c("region","ab"),sep = " ") %>%
+  mutate(region = factor(region,levels=c("In","Mid","Ex")),) %>%
+  split(f=.$ab)
+map(names(tmp),~{
+  tmp[[.x]] %>%
+    ggplot(aes(region,exp,color=cellID)) +
+    theme_bw() + geom_violin(color="grey") + geom_jitter(size=.6) + 
+    facet_wrap(~type) + ggtitle(.x) + dcolor +
+    labs(y = 'Expression Level')
+  }) %>%
+  patchwork::wrap_plots(guides = "collect",ncol = 6)
+```
+
+
+##  Clustering
+
+```{r}
+X <- as.matrix(tib2df(data[,-(2:5)]))
+p <- prcomp(X)
+screeplot(p,type='l',n=30)
+```
+
+```{r}
+total <- rowSums(data[,-(1:5)])
+cor(p$x[,1:30],total) %>%
+  plot(xlab = 'PC',ylab = 'CorCoef_vsTotalExp')
+```
+
+```{r}
+set.seed(10)
+um <- uwot::umap(p$x[,2:10],metric = "cosine",pca = 10,n_neighbors = 10,min_dist = .3)
+Meta <- data[,1:5] %>% 
+  mutate(UMAP1=um[,1],UMAP2=um[,2])
+
+style(Meta,"type",size=1,palette=F)
+style(Meta,"cellID",size=1)
+```
+
+```{r}
+set.seed(1)
+D <- as.matrix(dist(p$x[,2:10]))
+k <- 10
+adj <- apply(D,1,function(x) rank(x)%in%2:(k+1))
+g <- igraph::graph_from_adjacency_matrix(adj,mode='undirected')
+lei <- igraph::cluster_leiden(g,resolution_parameter = .02)
+```
+
+```{r}
+Meta <- Meta %>% mutate(cluster=as.factor(lei$membership))
+style(Meta,"cluster")  + ggsci::scale_color_lancet()
+```
+
+
+
+```{r}
+tmp <- data %>% select(-sampleName,-type,-cellID,-domainID) %>%
+  tib2df() %>% scale %>% t %>% scale %>% asinh()
+idx <- rownames(tmp) %>% sub(".* ","",.)
+mod <- model.matrix(~0+idx)
+colnames(mod) <- sub('idx','',colnames(mod))
+tmp2 <- (t(tmp)%*%mod)/3
+Dists <- dist(t(tmp2))
+h <- hclust(Dists, method = "average") 
+dend <- as.dendrogram(h)
+ggdend <- ggdendro::dendro_data(dend)
+ggdend$segments$y <- ggdend$segments$y/3
+ggdend$segments$yend <- ggdend$segments$yend/3
+g <- ggplot(ggdendro::segment(ggdend))
+g + geom_segment(aes(x=y,y=x,xend=yend,yend=xend)) + scale_x_reverse() + 
+  geom_text(data = ggdend$label, aes(y, x, label = label), hjust = 0, angle = 0) + xlim(10,-8) + theme_void()
+```
+
+```{r fig.width=6,fig.height=12}
+n <- ggdend$labels$label %>% length
+idx <- ggdend$labels$label %>% rev %>% rep(each=3) %>% paste0(rep(c("In ","Mid ","Ex "),n),.) 
+tmp <- tmp[idx,]
+
+anno <- data %>% select(Domain,sampleName) %>% 
+  separate(sampleName,into = c('type','cell')) %>% 
+  tib2df()
+anno$cluster <- as.factor(lei$membership)
+
+anno.color <- list()
+anno.color$type <- c('G' = "#F8766D", 'S' = "#00BFC4")
+anno.color$cell <- ggsci::scale_color_d3()$palette(10)
+anno.color$cluster <- ggsci::scale_color_lancet()$palette(4)
+names(anno.color$cell) <- formatC(1:10,width = 2,flag = '0')
+names(anno.color$cluster) <- 1:4
+
+pheatmap::pheatmap(tmp[,lei$membership == 1],
+                   cluster_rows = F,
+                   annotation_col = anno,annotation_colors = anno.color,show_colnames = F,
+                   color = viridis::viridis(32),border_color = NA,cellheight = 10,cellwidth = 2.5)
+pheatmap::pheatmap(tmp[,lei$membership == 2],
+                   cluster_rows = F,
+                   annotation_col = anno,annotation_colors = anno.color,show_colnames = F,
+                   color = viridis::viridis(32),border_color = NA,cellheight = 10,cellwidth = 2.5)
+pheatmap::pheatmap(tmp[,lei$membership == 3],
+                   cluster_rows = F,
+                   annotation_col = anno,annotation_colors = anno.color,show_colnames = F,
+                   color = viridis::viridis(32),border_color = NA,cellheight = 10,cellwidth = 2.5)
+pheatmap::pheatmap(tmp[,lei$membership == 4],
+                   cluster_rows = F,
+                   annotation_col = anno,annotation_colors = anno.color,show_colnames = F,
+                   color = viridis::viridis(32),border_color = NA,cellheight = 10,cellwidth = 2.5)
+```
+
+```{r}
+sessionInfo()
+```
+
+

@@ -1,0 +1,315 @@
+---
+title: "6_Carcinosarcoma_33x220plex"
+output: html_notebook
+---
+
+Down stream analysis of the dataset '6_Carcinosarcoma_33x220plex'
+
+## setup
+
+```{r setup}
+library(tidyverse)
+library(ggforce)
+library(Seurat)
+library(tidyverse)
+source("~/R/use_function.R")
+```
+
+```{r}
+dcolor <- ggsci::scale_color_d3('category20')
+dfill <- ggsci::scale_fill_d3('category20')
+ccolor <- viridis::scale_color_viridis()
+style <- function(x,color,method='UMAP',axis=c(1,2),Theme=NULL,
+                  axis.text=FALSE,axis.title=FALSE,coord_fix =TRUE,
+                  palette=TRUE,title=NULL,
+                  legend=TRUE,scale_color_log10=FALSE,
+                  guide_pointSize=2.5,...) {
+  axis <- paste0(method,axis)
+  if(is.null(Theme)) Theme <- theme_bw
+  g <- ggplot() + Theme()
+  g <- g + geom_point(aes_(x=as.name(axis[1]),y=as.name(axis[2]),color=as.name(color)),x,...)
+  
+  if(coord_fix) {
+    g <- g + coord_fixed()
+  }
+  if(!axis.text) {
+    g <- g + theme(axis.text = element_blank(),axis.ticks = element_blank())
+  }
+  if(!axis.title) {
+    g <- g + theme(axis.title = element_blank())
+  }
+  if(is.null(title)) {
+    g <- g + ggtitle(method) 
+  }else if(!is.na(title)) {
+    g <- g + ggtitle(title) 
+  }
+  if(!legend) g <- g + theme(legend.position = 'none')
+  
+  if(scale_type(as.matrix(x[,color]))=='discrete' & !is.null(guide_pointSize)) {
+    g <- g + guides(color = guide_legend(override.aes = list(size=guide_pointSize)))
+  }
+  
+  if(palette) {
+    if(scale_type(as.matrix(x[,color]))=='discrete') {
+      g <- g + ggsci::scale_color_d3('category20')
+    }else{
+      if(scale_color_log10){
+        g <- g + viridis::scale_color_viridis(trans='log10')
+      }else{
+        g <- g + viridis::scale_color_viridis()
+      }
+    }
+  }
+  return(g)
+}
+tib2df <- function(tib,RowNames=1) {
+  rn <- pull(tib,all_of(RowNames))
+  df <- tib %>%
+    select(-RowNames) %>%
+    as.data.frame()
+  rownames(df) <- rn
+  return(df)
+}
+```
+
+
+## load data
+
+```{r}
+data <- tibble(sampleName = c('r1','r2'),
+               path1 = list.files(
+                 '6_Carcinosarcoma_33x220plex/Raw/',
+                 full.names = T,pattern = 'PECAb'),
+               path2 = list.files(
+                 '6_Carcinosarcoma_33x220plex/Raw/',
+                 full.names = T,pattern = 'FISH')) %>%
+  mutate(
+    IF  = map(path1,~{
+      .x %>% read_csv(show_col_types = F) %>% 
+        unite(cell,tileID,cellID,sep = '-',remove = F) %>%
+        .[,-(2:8)] %>% arrange(cell)
+      }),
+    FISH  = map(path2,~{
+      .x %>% read_csv(show_col_types = F) %>% 
+        unite(cell,tileID,cellID,sep = '-',remove = F) %>%
+        .[,-(2:8)] %>% arrange(cell)
+      }),
+    meta = map(path1,~{
+      .x %>% read_csv(show_col_types = F) %>% 
+        unite(cell,tileID,cellID,sep = '-',remove = F) %>%
+        .[,1:8] %>% arrange(cell)
+      }),
+    meta = map2(meta,IF,~mutate(.x,totalExp = rowSums(.y[,-1]))),
+    meta = map2(meta,FISH,~mutate(.x,totalCount = rowSums(.y[,-1]))),
+    )
+```
+
+
+## QC
+
+```{r}
+data %>%
+  select(-IF,-FISH) %>% unnest(meta) %>%
+  ggplot(aes(x,y,color=sampleName)) +
+    theme_void() +
+    geom_point(size=.5) + 
+    facet_grid(~sampleName) + coord_fixed()
+```
+
+```{r}
+{data %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalExp)) + geom_violin() + geom_boxplot()}|
+{data %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalCount+1)) + geom_violin() + geom_boxplot() + scale_y_log10()}
+```
+
+
+```{r}
+dataf <- data %>%
+  mutate(
+    idx = map(meta,~{.x$totalExp > 0.2}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    FISH = map2(FISH,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]})
+    ) %>%
+  mutate(
+    idx = map(meta,~{.x$totalCount > 10}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    FISH = map2(FISH,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]})
+    ) %>%
+  mutate(
+    idx = map(IF,~{rowSums(.x[,-1]==0)==0}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    FISH = map2(FISH,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]}),
+    nCell = map(idx,sum) %>% unlist()
+    )
+
+{dataf %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalExp)) + geom_violin() + geom_boxplot()}|
+{dataf %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalCount)) + geom_violin() + geom_boxplot() + scale_y_log10()}
+
+dataf %>%  
+  ggplot(aes(sampleName,nCell)) + 
+  theme_classic() +
+  geom_bar(stat='identity') +
+  scale_x_discrete(limits=rev) +
+  theme(axis.title.y = element_blank()) +  
+  coord_flip() + theme(aspect.ratio = .35) 
+```
+
+```{r fig.width=8}
+markers <- dataf %>%
+  select(sampleName,IF) %>% unnest(IF) %>%
+  unite(Cell,sampleName,cell,sep='-') %>%
+  tib2df() %>% scale() %>% asinh() %>%
+  .[,c('E-Cadherin','N-Cadherin','VIM')]
+metaf %>%
+  select(x,y,sampleName) %>%
+  bind_cols(markers) %>%
+  gather(key = Prot,value = Exp,-(1:3)) %>%
+  ggplot(aes(x,y,color=Exp)) + geom_point(size=.25) + theme_void() + coord_fixed() + facet_grid(sampleName~Prot) + 
+  scale_color_gradient2(low='#d3d3d3',high='red',mid='red',midpoint =1.5)
+```
+
+
+
+
+
+
+## FISH clustering 
+
+```{r warning=F}
+mat <- dataf %>%
+  select(sampleName,FISH) %>% unnest(FISH) %>%
+  unite(Cell,sampleName,cell,sep='-') %>%
+  tib2df() %>% t
+mat <- mat[,a]
+mat <- mat[,colSums(mat)>20]
+seu <- CreateSeuratObject(mat,min.cells = 100,min.features = 30)
+seu <- NormalizeData(seu,scale.factor = 500)
+seu <- ScaleData(seu)
+seu <- FindVariableFeatures(seu)
+seu <- RunPCA(seu,features = VariableFeatures(seu))
+ElbowPlot(seu)
+Signac::DepthCor(seu,reduction = 'pca')
+```
+
+```{r}
+DimHeatmap(seu, dims = 1:6, cells = 500, balanced = TRUE)
+```
+
+```{r warning=F}
+seu <- RunUMAP(seu,dims = 2:10,min.dist = .01,n.neighbors = 20)
+seu <- FindNeighbors(seu,dims = 2:10,k.param = 30)
+seu <- FindClusters(seu,resolution = .5,algorithm = 4,method = 'igraph')
+```
+
+```{r}
+um <- Embeddings(seu[['umap']]) %>%
+  as_tibble(rownames='Cell') %>%
+  rename(UMAP1=2,UMAP2=3) %>%
+  mutate(cluster = seu$seurat_clusters)
+Metaum <- metaf %>%
+  unite(Cell,sampleName,cell,remove = F,sep = '-') %>%
+  inner_join(um,by = 'Cell')
+style(Metaum,'cluster',size=.5)
+style(Metaum,'totalCount',size=.5) + viridis::scale_color_viridis(trans='log10')
+```
+
+```{r} 
+fm <- FindAllMarkers(seu,only.pos = T)
+genes <- fm %>% 
+  as_tibble() %>% mutate(cluster = as.character(cluster)) %>%
+  with(split(gene,cluster)) 
+topgenes <- map(genes,~{tmp <- head(.x,min(length(.x),6)); factor(tmp,levels=tmp)})
+topgenes %>% 
+  lapply(function(Y){
+    lapply(Y,function(y){
+      data <- FetchData(object = seu, vars = y)
+      data$cluster <- as.character(Idents(seu))
+      y_ <- paste0("`", y, "`")
+      as_tibble(data) %>%
+        ggplot(aes_string(x='cluster',y=y_,fill='cluster')) +
+        theme_classic() + 
+        geom_violin(scale='width',adjust=1) +
+        theme(legend.position = 'none',
+              axis.title = element_blank(),
+              panel.grid.major.x = element_blank(),
+              plot.title = element_text(hjust = 0.5) ) +
+        labs(title = y) + dfill
+      }) %>% 
+      patchwork::wrap_plots(nrow=1)
+    }) %>%
+  patchwork::wrap_plots(ncol=1)
+```
+
+
+```{r}
+idx <- Metaum %>%
+  mutate(cluster = as.character(cluster)) %>%
+  with(model.matrix(~0+cluster))
+colnames(idx) <- sub("sampleName","",colnames(idx))
+X <- dataf %>% 
+  select(sampleName,IF) %>% unnest(IF) %>%
+  unite(Cell,sampleName,cell,sep = '-') %>% tib2df()
+X <- X[Metaum$Cell,]
+avgmat <- X %>% as.matrix() %>% t %>% {t(.%*%idx)/colSums(idx)} %>% scale 
+pheatmap::pheatmap(avgmat,cellwidth = 10,cellheight = 20,color=viridis::viridis(10))
+pheatmap::pheatmap(asinh(avgmat),cellwidth = 10,cellheight = 20,color=viridis::viridis(10))
+```
+
+```{r}
+domi1 <- Metaum %>%
+  mutate(x=floor(x/1000),y=floor(y/1000)) %>%
+  count(x,y,sampleName,cluster) %>%
+  group_by(x,y,sampleName) %>% arrange(-n) %>%
+  summarise(tot = sum(n),
+            n = head(n,1),
+            dom = head(cluster,1)) %>%
+  ungroup() %>%
+  mutate(Accp = n/tot) 
+domi1 %>%
+  ggplot(aes(x,y,color=dom,size=n,alpha=Accp)) + 
+  theme_no_axes() + geom_point() + 
+  coord_fixed() + facet_wrap(~sampleName) +
+  xlim(.5,20.5) + ylim(.5,20.5) + 
+  dcolor +
+  labs(alpha='Accpancy',size='nTotal cell',color='dominant cluster') +
+  theme(strip.background = element_blank()) 
+```
+
+```{r}
+domi2 <- Metaum %>%
+  mutate(x=floor(x/1000),y=floor(y/1000),
+         cluster = ifelse(cluster == 1,'Activated',cluster),
+         cluster = ifelse(cluster == 2,'Epithelial',cluster),
+         cluster = ifelse(cluster %in% 3:5,'Mesenchymal',cluster),
+         cluster = factor(cluster,levels = c('Activated','Epithelial','Mesenchymal'))) %>%
+  count(x,y,sampleName,cluster) %>%
+  group_by(x,y,sampleName) %>% arrange(-n) %>%
+  summarise(tot = sum(n),
+            n = head(n,1),
+            dom = head(cluster,1)) %>%
+  ungroup() %>%
+  mutate(Accp = n/tot) 
+domi2 %>%
+  ggplot(aes(x,y,color=dom,size=n,alpha=Accp)) + 
+  theme_no_axes() + geom_point() + 
+  coord_fixed() + facet_wrap(~sampleName) +
+  xlim(.5,20.5) + ylim(.5,20.5) + 
+  scale_color_manual(values = dcolor$palette(8)[c(1,2,8)]) +
+  labs(alpha='Accpancy',size='nTotal cell',color='dominant cluster') +
+  theme(strip.background = element_blank()) 
+```
+
+```{r}
+sessionInfo()
+```
+

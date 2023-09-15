@@ -1,0 +1,303 @@
+---
+title: "4_A549_27plex_analysis"
+output: html_notebook
+---
+
+Down stream analysis of the dataset '4_A549_27plex'
+
+## setup
+
+```{r setup}
+knitr::opts_chunk$set(dev = "png",dpi = 80)
+library(ggforce)
+library(tidyverse)
+```
+
+```{r load tools}
+dcolor <- ggsci::scale_color_d3('category20')
+dfill <- ggsci::scale_fill_d3('category20')
+ccolor <- viridis::scale_color_viridis()
+style <- function(x,color,method='UMAP',axis=c(1,2),Theme=NULL,
+                  axis.text=FALSE,axis.title=FALSE,coord_fix =TRUE,
+                  palette=TRUE,title=NULL,
+                  legend=TRUE,scale_color_log10=FALSE,
+                  guide_pointSize=2.5,...) {
+  axis <- paste0(method,axis)
+  if(is.null(Theme)) Theme <- theme_bw
+  g <- ggplot() + Theme()
+  g <- g + geom_point(aes_(x=as.name(axis[1]),y=as.name(axis[2]),color=as.name(color)),x,...)
+  
+  if(coord_fix) {
+    g <- g + coord_fixed()
+  }
+  if(!axis.text) {
+    g <- g + theme(axis.text = element_blank(),axis.ticks = element_blank())
+  }
+  if(!axis.title) {
+    g <- g + theme(axis.title = element_blank())
+  }
+  if(is.null(title)) {
+    g <- g + ggtitle(method) 
+  }else if(!is.na(title)) {
+    g <- g + ggtitle(title) 
+  }
+  if(!legend) g <- g + theme(legend.position = 'none')
+  
+  if(scale_type(as.matrix(x[,color]))=='discrete' & !is.null(guide_pointSize)) {
+    g <- g + guides(color = guide_legend(override.aes = list(size=guide_pointSize)))
+  }
+  
+  if(palette) {
+    if(scale_type(as.matrix(x[,color]))=='discrete') {
+      g <- g + ggsci::scale_color_d3('category20')
+    }else{
+      if(scale_color_log10){
+        g <- g + viridis::scale_color_viridis(trans='log10')
+      }else{
+        g <- g + viridis::scale_color_viridis()
+      }
+    }
+  }
+  return(g)
+}
+tib2df <- function(tib,RowNames=1) {
+  rn <- pull(tib,all_of(RowNames))
+  df <- tib %>%
+    select(-RowNames) %>%
+    as.data.frame()
+  rownames(df) <- rn
+  return(df)
+}
+```
+
+
+##  load data
+
+```{r}
+data <- tibble(
+  path = list.files("4_A549_27plex/Raw/",full.names = T),
+  sampleName = c('0h-r1', '0h-r2', '0p5h-r1', '0p5h-r2', '24h-r1', '24h-r2', '48h-r1', '48h-r2')
+  ) %>%
+  separate(sampleName,into=c('treat','rep'),remove = F) %>%
+  mutate(
+    metric = map(path,~{
+      .x %>%
+        read_csv(show_col_types=F) %>% 
+        unite(cell,tileID,cellID,sep = '-',remove = F)
+      }),
+    IF = map(metric,~{.x[,-(2:8)]}),
+    meta = map2(metric,IF,~{
+      .x[,1:8] %>%
+        unite(cell,tileID,cellID,sep = '-',remove = F) %>%
+        mutate(totalExp = rowSums(.y[,-1]))
+      }),
+    ) %>%
+  select(-path,-metric)
+```
+
+
+## Quality check & control
+
+```{r}
+data %>%
+  select(-IF) %>% unnest(meta) %>%
+  ggplot(aes(x,y,color=treat)) +
+    theme_void() +
+    geom_point(size=.1) + dcolor +
+    facet_grid(rep~treat) + coord_fixed()
+```
+
+```{r}
+data %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalExp)) + geom_violin() + geom_boxplot()
+```
+
+```{r}
+dataf <- data %>%
+  mutate(
+    idx = map(meta,~{.x$totalExp > 1.3}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]})
+    ) %>%
+  mutate(
+    idx2 = map(IF,~{rowSums(.x[,-1]==0) == 0}),
+    IF = map2(IF,idx2,~{.x[.y,]}),
+    meta = map2(meta,idx2,~{.x[.y,]}),
+    nCell = map(idx2,sum) %>% unlist()
+    ) %>%
+  select(-idx,-idx2)
+
+dataf %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalExp)) + 
+  geom_violin() + geom_boxplot()
+```
+
+```{r}
+dataf %>%  
+  ggplot(aes(sampleName,nCell)) + 
+  theme_classic() +
+  geom_bar(stat='identity') +
+  scale_x_discrete(limits=rev) +
+  theme(axis.title.y = element_blank()) +  
+  coord_flip() + theme(aspect.ratio = .35) 
+```
+
+```{r}
+tmp <- dataf %>% select(sampleName,IF) %>% unnest(IF)
+idx <- with(tmp,model.matrix(~0+sampleName))
+colnames(idx) <- sub("sampleName","",colnames(idx))
+avgmat <- tmp[,-(1:2)] %>% as.matrix() %>% t %>% {t(.%*%idx)/colSums(idx)} %>% scale %>% asinh %>% t 
+pheatmap::pheatmap(avgmat,cluster_cols = F,cellwidth = 10,color=viridis::viridis(10),show_rownames = T)
+```
+
+
+```{r}
+Meta <- dataf %>%
+  select(sampleName,treat,rep,meta) %>% unnest(meta) %>%
+  unite(Cell,treat,rep,cell,sep = '-',remove = F)
+X <- bind_rows(dataf$IF) %>% select(-cell) %>% 
+   scale() %>% asinh()
+rownames(X) <- Meta$Cell
+```
+
+```{r}
+p <- prcomp(X)
+screeplot(p,type='l',n=30)
+```
+
+```{r}
+total <- bind_rows(dataf$meta) %>% pull(totalExp) 
+cor(p$x,total) %>%
+  plot(xlab = 'PC',ylab = 'CorCoef_vsTotalExp')
+```
+
+```{r fig.asp=.5}
+um <- uwot::umap(p$x[,2:6],
+                 metric = 'cosine',
+                 n_neighbors = 30,
+                 min_dist = .1) %>%
+  as_tibble(rownames = 'Cell') %>%
+  dplyr::rename(UMAP1=2,UMAP2=3)
+Metaum <- inner_join(Meta,um,by = 'Cell')
+
+style(Metaum,'treat',title = NULL,size = .1,alpha = .6)
+style(Metaum,'sampleName',title = NA,size = .1,alpha = .6)
+style(Metaum,'totalExp',title = NA,size = .1,alpha = .6)
+```
+
+
+
+## Pseudo time
+
+Using the datasets of 0h and 0.5h treatment
+
+```{r}
+Meta2 <- Meta %>% filter(treat %in% c('0h','0p5h'))
+X2 <- dataf %>%
+  filter(treat %in% c('0h','0p5h')) %>%
+  pull(IF) %>% bind_rows() %>% 
+  select(-cell) %>% 
+  scale() %>% asinh()
+rownames(X2) <- Meta2$Cell
+```
+
+```{r}
+p2 <- prcomp(X2)
+screeplot(p2,type='l',n=30)
+```
+
+```{r}
+total2 <- Meta2$totalExp
+cor(p2$x,total2) %>%
+  plot(xlab = 'PC',ylab = 'CorCoef_vsTotalExp')
+```
+
+```{r}
+um2 <- uwot::umap(p2$x[,2:6],
+                 metric = 'cosine',
+                 n_neighbors = 30,
+                 min_dist = .1) %>%
+  as_tibble(rownames = 'Cell') %>%
+  dplyr::rename(UMAP1=2,UMAP2=3)
+Metaum2 <- inner_join(Meta2,um2,by = 'Cell')
+style(Metaum2,'treat',title = NULL,size = .1,alpha = .6)
+```
+
+
+```{r}
+ph2 <- phateR::phate(p2$x[,2:6],
+                     mds.dist.method = 'cosine',
+                     knn = 20)
+Metaum2 <- Metaum2 %>%
+  mutate(PHATE1 = ph2$embedding[,1],PHATE2 = ph2$embedding[,2])
+style(Metaum2,'treat','PHATE',size=.1)
+style(Metaum2,'rep','PHATE',size=.1,palette = F)
+```
+
+
+```{r}
+set.seed(1); km <- kmeans(ph2$embedding,centers=5)
+Metaum2 %>% 
+  mutate(km=as.factor(km$cluster)) %>%
+  style('km','PHATE',size=.1)
+```
+
+```{r}
+library(slingshot)
+sce <- getLineages(ph2$embedding,as.character(km$cluster),start.clus = '5') %>%
+  getCurves() %>% slingPseudotime() %>%
+  as_tibble(rownames='Cell') %>% mutate(Lineage1 = Lineage1/max(Lineage1)) %>%
+  rename(PseudoTime = Lineage1)
+Metaum2 <- left_join(Metaum2,sce,by='Cell')
+Metaum2 %>% style("PseudoTime","PHATE",size=.2) + theme_void()
+Metaum2 %>% style("PseudoTime","UMAP",size=.2) + theme_void()
+```
+
+```{r}
+Metaum2 %>%
+  ggplot(aes(PseudoTime,fill=treat)) + geom_histogram(position = 'dodge') + theme_classic() + dfill + coord_fixed(ratio=.0003) +
+  theme(axis.ticks = element_blank(),panel.grid = element_blank())
+```
+
+```{r}
+LOESS <- dataf %>%
+  filter(treat %in% c("0h","0p5h")) %>%
+  select(sampleName,IF) %>% unnest(IF) %>%
+  unite(Cell,sampleName,cell,sep='-') %>%
+  left_join(select(Metaum2,Cell,PseudoTime),.) %>%
+  gather(Prot,ExpLevel,-(1:2)) %>%
+  group_by(Prot) %>% nest() %>%
+  mutate(LOESS = map(data,~loess(ExpLevel~PseudoTime,.x,span = 0.2)),
+         PRED = map(LOESS,~predict(.x,newdata=seq(0,1,by=0.01))),
+         newdata = map(PRED,~tibble(PseudoTime=seq(0,1,by=0.01),PRED=.x)) )
+
+loessPl <- function(x,ratio = .35){
+  ggplot(x,aes(PseudoTime,scaled,color=Prot)) + 
+  geom_line() + theme_bw() +
+  theme(legend.position = 'none') +
+  theme(axis.ticks.y = element_blank(),
+        strip.background = element_rect(fill=NA,color=NA), 
+        panel.grid.major.x = element_blank(),panel.grid.minor = element_blank()) + 
+  coord_fixed(ratio=ratio) + labs(y = 'scaled expression level')
+}
+
+LOESS_scaled <- LOESS %>% select(Prot,newdata) %>% 
+  mutate(newdata = map(newdata,~mutate(.x,scaled = (PRED-min(PRED))/(max(PRED)-min(PRED)) ))) %>%
+  unnest(newdata)  %>% ungroup()
+
+usep <- c("p4EBP1/2/3","pATM","pELF2A","pERK","pFAK","pp38","pSMAD1/5","pSMAD3","pSTAT3")
+LOESS_scaled %>% filter(Prot %in% usep) %>% loessPl()
+LOESS_scaled %>% filter(Prot %in% usep) %>% loessPl() + facet_wrap(~Prot)
+```
+
+```{r}
+LOESS_scaled %>% filter(!Prot %in% usep) %>% loessPl() + facet_wrap(~Prot)
+LOESS_scaled %>% filter(!Prot %in% usep) %>% loessPl()
+```
+
+```{r}
+sessionInfo()
+```
+

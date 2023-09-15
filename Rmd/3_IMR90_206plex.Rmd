@@ -1,0 +1,566 @@
+---
+title: "3_IMR90_206plex_analysis"
+output: html_notebook
+---
+
+Down stream analysis of the dataset '3_IMR90_206plex'
+
+## setup
+
+```{r setup}
+library(Seurat)
+library(ggforce)
+library(tidyverse)
+```
+
+```{r}
+dcolor <- ggsci::scale_color_d3('category20')
+dfill <- ggsci::scale_fill_d3('category20')
+ccolor <- viridis::scale_color_viridis()
+style <- function(x,color,method='UMAP',axis=c(1,2),Theme=NULL,
+                  axis.text=FALSE,axis.title=FALSE,coord_fix =TRUE,
+                  palette=TRUE,title=NULL,
+                  legend=TRUE,scale_color_log10=FALSE,
+                  guide_pointSize=2.5,...) {
+  axis <- paste0(method,axis)
+  if(is.null(Theme)) Theme <- theme_bw
+  g <- ggplot() + Theme()
+  g <- g + geom_point(aes_(x=as.name(axis[1]),y=as.name(axis[2]),color=as.name(color)),x,...)
+  
+  if(coord_fix) {
+    g <- g + coord_fixed()
+  }
+  if(!axis.text) {
+    g <- g + theme(axis.text = element_blank(),axis.ticks = element_blank())
+  }
+  if(!axis.title) {
+    g <- g + theme(axis.title = element_blank())
+  }
+  if(is.null(title)) {
+    g <- g + ggtitle(method) 
+  }else if(!is.na(title)) {
+    g <- g + ggtitle(title) 
+  }
+  if(!legend) g <- g + theme(legend.position = 'none')
+  
+  if(scale_type(as.matrix(x[,color]))=='discrete' & !is.null(guide_pointSize)) {
+    g <- g + guides(color = guide_legend(override.aes = list(size=guide_pointSize)))
+  }
+  
+  if(palette) {
+    if(scale_type(as.matrix(x[,color]))=='discrete') {
+      g <- g + ggsci::scale_color_d3('category20')
+    }else{
+      if(scale_color_log10){
+        g <- g + viridis::scale_color_viridis(trans='log10')
+      }else{
+        g <- g + viridis::scale_color_viridis()
+      }
+    }
+  }
+  return(g)
+}
+tib2df <- function(tib,RowNames=1) {
+  rn <- pull(tib,all_of(RowNames))
+  df <- tib %>%
+    select(-RowNames) %>%
+    as.data.frame()
+  rownames(df) <- rn
+  return(df)
+}
+```
+
+
+##  load data
+
+```{r}
+data <- tibble(
+  path = list.files('3_IMR90_206plex/Raw/',full.names = T),
+  sampleName = c('d0-r1', 'd0-r2', 'd3-r1', 'd3-r2', 'd6-r1', 'd6-r2')
+  ) %>%
+  separate(sampleName,into=c('day','rep'),remove = F) %>%
+  mutate(
+    metric = map(path,~{
+      .x %>%
+        read_csv(show_col_types=F) %>% 
+        unite(cell,tileID,cellID,sep = '-',remove = F)
+      }),
+    IF = map(metric,~{.x[,-(2:8)]}),
+    meta = map2(metric,IF,~{
+      .x[,1:8] %>%
+        unite(cell,tileID,cellID,sep = '-',remove = F) %>%
+        mutate(totalExp = rowSums(.y[,-(1:3)]))
+      }),
+    ) %>%
+  select(-path,-metric)
+```
+
+
+## Quality check & control
+
+```{r}
+data %>%
+  select(-IF) %>% unnest(meta) %>%
+  ggplot(aes(x,y,color=day)) +
+    theme_void() +
+    geom_point(size=.5) + dcolor +
+    facet_grid(rep~day) + coord_fixed()
+```
+
+```{r}
+data %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalExp)) + geom_violin() + geom_boxplot()
+```
+
+```{r}
+thrsl = c(7,7,5)
+names(thrsl) <- c('d0','d3','d6')
+
+dataf <- data %>%
+  mutate(
+    idx = map2(meta,day,~{.x$totalExp > thrsl[.y]}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]})
+    ) %>%
+  mutate(
+    idx2 = map(IF,~{rowSums(.x[,-1]==0) == 0}),
+    IF = map2(IF,idx2,~{.x[.y,]}),
+    meta = map2(meta,idx2,~{.x[.y,]}),
+    nCell = map(idx2,sum) %>% unlist()
+    ) %>%
+  select(-idx,-idx2)
+
+dataf %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalExp)) + 
+  geom_violin() + geom_boxplot()
+```
+
+```{r}
+dataf %>%  
+  ggplot(aes(sampleName,nCell)) + 
+  theme_classic() +
+  geom_bar(stat='identity') +
+  scale_x_discrete(limits=rev) +
+  theme(axis.title.y = element_blank()) +  
+  coord_flip() + theme(aspect.ratio = .35) 
+```
+
+```{r}
+tmp <- dataf %>% select(sampleName,IF) %>% unnest(IF)
+idx <- with(tmp,model.matrix(~0+sampleName))
+colnames(idx) <- sub("sampleName","",colnames(idx))
+avgmat <- tmp[,-(1:2)] %>% as.matrix() %>% t %>% {t(.%*%idx)/colSums(idx)} %>% scale %>% asinh %>% t 
+pheatmap::pheatmap(avgmat,cluster_cols = F,cellwidth = 10,color=viridis::viridis(10),show_rownames = F)
+```
+
+```{r}
+Meta <- dataf %>%
+  select(sampleName,day,rep,meta) %>% unnest(meta) %>%
+  unite(Cell,day,rep,cell,sep = '-',remove = F)
+X <- bind_rows(dataf$IF) %>% select(-cell) %>% 
+   scale() %>% asinh()
+rownames(X) <- Meta$Cell
+```
+
+
+```{r}
+p <- prcomp(X)
+screeplot(p,type='l',n=30)
+```
+
+```{r}
+total <- bind_rows(dataf$meta) %>% pull(totalExp) 
+cor(p$x[,1:30],total) %>%
+  plot(xlab = 'PC',ylab = 'CorCoef_vsTotalExp')
+```
+
+
+```{r fig.asp=.5}
+um <- uwot::umap(p$x[,2:20],
+                 metric = 'cosine',
+                 n_neighbors = 30,
+                 min_dist = .3) %>%
+  as_tibble(rownames = 'Cell') %>%
+  dplyr::rename(UMAP1=2,UMAP2=3)
+Metaum <- inner_join(Meta,um,by = 'Cell')
+ums <- list(
+  style(Metaum,'day',title = NULL,size = .25,alpha = .6),
+  style(Metaum,'rep',title = NA,size = .25,alpha = .6),
+  style(Metaum,'totalExp',title = NA,size = .25,alpha = .6)
+  ) %>%
+  patchwork::wrap_plots(ncol = 3)
+ums
+```
+
+```{r fig.asp=0.6}
+markers <- c('H3.1','LMNB1','IL-6','p21','pSTAT3')
+markers_exp <- X %>%
+  as_tibble(rownames = 'Cell') %>%
+  select(Cell,all_of(markers)) %>%
+  gather(key=SYMBOL,value=ExpLevel,-Cell)
+a1 <- Metaum %>%
+  inner_join(markers_exp,by = 'Cell') %>%
+  style('ExpLevel',size=.2,title = "") + 
+    theme_bw() + facet_wrap(~SYMBOL,nrow=1) +
+    theme(axis.ticks = element_blank(),
+          axis.text = element_blank()) +
+    labs(color='Expression Level')
+a2 <- Metaum %>%
+  inner_join(markers_exp,by='Cell') %>%
+  ggplot(aes(sampleName,ExpLevel,fill=day)) +
+    theme_bw() +
+    geom_violin() + 
+    geom_boxplot(width=.2,fill='white',outlier.color = NA) +
+    facet_wrap(~SYMBOL,nrow=1,scales='free') +
+    theme(axis.ticks.x = element_blank(),
+          axis.text.x = element_blank()) +
+    dfill + labs(y='Expression Level')
+(a1/a2) + patchwork::plot_layout(guides = 'collect',heights = c(1.3,1))
+```　
+
+
+
+
+## Pseudo time
+
+```{r}
+Senes <- c("gH2AX","HMGA1","Ki67","IL-1a","IL-6","IL-8","LMNB1","p21","p53BP1","PML")
+Senes_exp <- X %>%
+  as_tibble(rownames = 'Cell') %>%
+  select(Cell,all_of(Senes)) %>%
+  gather(key=SYMBOL,value=ExpLevel,-Cell)
+Metaum %>%
+  inner_join(Senes_exp,by='Cell') %>%
+  ggplot(aes(sampleName,ExpLevel,fill=day)) +
+    theme_bw() +
+    geom_violin() + 
+    geom_boxplot(width=.2,fill='white',outlier.color = NA) +
+    facet_wrap(~SYMBOL,scales='free_y') +
+    theme(axis.ticks.x = element_blank(),
+          axis.text.x = element_blank()) +
+    dfill + labs(y='Expression Level')
+```
+
+```{r}
+p2 <- prcomp(X[,Senes])
+screeplot(p2,type='l',n=30)
+```
+
+```{r}
+ph <- p2$x[,-1] %>% 
+  phateR::phate(mds.dist.method = "cosine",
+                knn = 30)
+Metaum <- Metaum %>%
+  mutate(PHATE1=ph$embedding[,1],PHATE2=ph$embedding[,2])
+
+style(Metaum,"day",method = "PHATE",size=.5)
+style(Metaum,"totalExp",method = "PHATE",size=.5)
+```
+
+
+```{r}
+set.seed(1); clu <- ph$embedding %>% kmeans(centers = 5)
+ph$embedding %>%
+  as_tibble() %>%
+  mutate(clu=as.character(clu$cluster)) %>%
+  style("clu","PHATE",palette = F,size=.3)
+```
+
+```{r}
+library(slingshot)
+sce <- getLineages(ph$embedding, clu$cluster, start.clus = '3')
+sce <- getCurves(sce)
+sce
+PT <- slingPseudotime(sce)[,1]
+PT <- (PT-min(PT))/(max(PT)-min(PT))
+Metaum <- Metaum %>% mutate(PseudoTime=PT)
+Metaum
+```
+
+```{r}
+{style(Metaum,'PseudoTime',"PHATE",size=.5)/style(Metaum,'PseudoTime',"UMAP",size=.5)} + patchwork::plot_layout(guides = 'collect')|
+  {style(Metaum,'day',"PHATE",size=.5)/style(Metaum,'day',"UMAP",size=.5)} + patchwork::plot_layout(guides = 'collect')
+```
+
+```{r}
+Metaum <- Metaum %>%
+  arrange(PseudoTime) %>%
+  mutate(
+    dPseudoTime = (floor(PseudoTime*10)+.5)/10,
+    dPseudoTime = ifelse(dPseudoTime==1.05,.95,dPseudoTime),
+    dPseudoTime = as.factor(dPseudoTime)
+    )
+
+Metaum %>%
+  ggplot(aes(PseudoTime,fill=day)) +
+  theme_bw() +
+  geom_histogram(position = "dodge") + dfill
+Metaum %>%
+  dplyr::count(dPseudoTime,day) %>%
+  ggplot(aes(dPseudoTime,n,fill=day)) + geom_bar(stat = "identity") + dfill +
+  theme_bw() +
+  labs(y="count")
+```
+
+```{r}
+a <- as_tibble(X,rownames="Cell") %>%
+  gather(key=Prot,value=ExpLevel,-Cell) %>%
+  left_join(Metaum,by="Cell")
+
+Newdata <- seq(0.2,0.8,by=0.01)
+Span <- 0.3
+
+use_p1 <- c('HMGA1','Ki67','LMNB1','p21','p53BP1','PML')
+LOESS1 <- a %>%
+  filter(Prot %in% use_p1) %>%
+  select(Prot,ExpLevel,PseudoTime) %>%
+  group_by(Prot) %>% nest() %>%
+  mutate(LOESS = map(data,~loess(ExpLevel~PseudoTime,.x,span = Span)),
+         PRED = map(LOESS,~predict(.x,newdata=Newdata)),
+         newdata = map(PRED,~tibble(PseudoTime=Newdata,PRED=.x)) )
+
+loessPl <- function(x,ratio = .35){
+  ggplot(x,aes(PseudoTime,scaled,color=Prot)) + 
+  geom_line() + theme_bw() +
+  theme(legend.position = 'none') +
+  theme(axis.ticks.y = element_blank(),
+        strip.background = element_rect(fill=NA,color=NA), 
+        panel.grid.major.x = element_blank(),panel.grid.minor = element_blank()) + 
+  coord_fixed(ratio=ratio) + labs(y = 'scaled expression level')
+}
+
+LOESS1_scaled <- LOESS010f %>% select(Prot,newdata) %>% 
+  mutate(newdata = map(newdata,~mutate(.x,scaled = (PRED-min(PRED))/(max(PRED)-min(PRED)) ))) %>%
+  unnest(newdata)  %>% ungroup()
+loessPl(LOESS1_scaled)
+loessPl(LOESS1_scaled) + facet_wrap(~Prot)
+```
+
+```{r}
+use_p2 <- c("bCatenin","BCL2L1","Frizzled7","NOTCH1","p53BP1","pAKT","pATF2","pATM","pSMAD1/5","pSMAD3","pSRC")
+
+LOESS2 <- a %>%
+  filter(Prot %in% use_p2) %>%
+  select(Prot,ExpLevel,PseudoTime) %>%
+  group_by(Prot) %>% nest() %>%
+  mutate(LOESS = map(data,~loess(ExpLevel~PseudoTime,.x,span = Span)),
+         PRED = map(LOESS,~predict(.x,newdata=Newdata)),
+         newdata = map(PRED,~tibble(PseudoTime=Newdata,PRED=.x)) )
+LOESS2_scaled <- LOESS2 %>% select(Prot,newdata) %>% 
+  mutate(newdata = map(newdata,~mutate(.x,scaled = (PRED-min(PRED))/(max(PRED)-min(PRED)) ))) %>%
+  unnest(newdata)  %>% ungroup()
+loessPl(LOESS2_scaled)
+loessPl(LOESS2_scaled) + facet_wrap(~Prot)
+```
+
+```{r}
+LOESS3 <- a %>%
+  filter(!Prot %in% use_p1,
+         !Prot %in% use_p2) %>%
+  select(Prot,ExpLevel,PseudoTime) %>%
+  group_by(Prot) %>% nest() %>%
+  mutate(LOESS = map(data,~loess(ExpLevel~PseudoTime,.x,span = Span)),
+         PRED = map(LOESS,~predict(.x,newdata=Newdata)),
+         newdata = map(PRED,~tibble(PseudoTime=Newdata,PRED=.x)) )
+LOESS3_scaled <- LOESS3 %>% select(Prot,newdata) %>% 
+  mutate(newdata = map(newdata,~mutate(.x,scaled = (PRED-min(PRED))/(max(PRED)-min(PRED)) ))) %>%
+  unnest(newdata)  %>% ungroup()
+id <- unique(LOESS3_scaled$Prot)
+LOESS3_scaled %>%
+  filter(Prot %in% id[1:48]) %>%
+  loessPl(ratio = .2) + facet_wrap(~Prot,nrow = 6) +
+  theme(axis.text = element_blank(),axis.ticks.x = element_blank())
+LOESS3_scaled %>%
+  filter(Prot %in% id[49:96]) %>%
+  loessPl(ratio = .2) + facet_wrap(~Prot,nrow = 6) +
+  theme(axis.text = element_blank(),axis.ticks.x = element_blank())
+LOESS3_scaled %>%
+  filter(Prot %in% id[97:144]) %>%
+  loessPl(ratio = .2) + facet_wrap(~Prot,nrow = 6) + 
+  theme(axis.text = element_blank(),axis.ticks.x = element_blank())
+LOESS3_scaled %>%
+  filter(Prot %in% id[145:190]) %>%
+  loessPl(ratio = .3) + facet_wrap(~Prot,nrow = 6) +
+  theme(axis.text = element_blank(),axis.ticks.x = element_blank())
+```
+
+
+## Spatial
+
+### spatial corrrelation
+
+```{r}
+spaCor <- function (x, coord, scaled = FALSE, R = 999){
+  x <- asinh(scale(x))
+  pos.dist <- dist(x = coord)
+  pos.dist.mat <- as.matrix(x = pos.dist)
+  w <- 1/pos.dist.mat^2
+  diag(x = w) <- 0
+  w <- w/sum(w)
+  X <- t(w) %*% scale(x)
+  t(scale(x))%*%X
+}
+
+Spas <- dataf %>%
+  select(sampleName,day,rep,meta,IF) %>%
+  mutate(
+    IF = map2(IF,sampleName,~{
+      .x %>% 
+        mutate(cell = paste(.y,cell,sep='-')) %>%
+        tib2df() %>% as.matrix() }),
+    meta = map2(meta,sampleName,~{
+      .x %>%
+        mutate(Cell = paste(.y,cell,sep='-')) %>% 
+        select(Cell,x,y) %>% tib2df() %>% as.matrix()}),
+    spatialCorMat = map2(IF,meta,~spaCor(.x,.y,scaled = T)),
+    spatialCorList = map(spatialCorMat,~{
+      .x[!upper.tri(.x)] <- NA
+      as_tibble(.x,rownames = 'A') %>%
+        gather(B,spatialCor,-A) %>% na.omit()
+      }),
+    canonicalCorMat = map2(IF,meta,~cor(.x)),
+    canonicalCorList = map(canonicalCorMat,~{
+      .x[!upper.tri(.x)] <- NA
+      as_tibble(.x,rownames = 'A') %>%
+        gather(B,canonicalCor,-A) %>% na.omit()
+      })
+    ) %>%
+  select(-IF,-meta) %>%
+  mutate(dat = map2(spatialCorList,canonicalCorList,~{
+    inner_join(.x,.y,by=c('A','B'))
+  })) 
+Spas_ <- Spas %>%
+  select(-spatialCorMat) %>%
+  unnest(spatialCorList) %>%
+  ungroup() %>%
+  unite(lab,A,B,sep=':')
+```
+
+```{r}
+use <- c("NOTCH1:pATM","p21:NOTCH1","p21:pATM")
+Spas_ %>% filter(lab %in% use) %>%
+  group_by(day,lab ) %>% summarise(spatialCor = mean(spatialCor)) %>%
+  ungroup() %>%
+  ggplot(aes(day,spatialCor,color=lab,group=lab)) + 
+  theme_bw() +
+  geom_point(size=2) + 
+  geom_line() +
+  geom_hline(yintercept = 0,linetype='dashed') +
+  theme(panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        axis.title.x = element_blank()) +
+  labs(color = 'Pair',y = 'spatial correlation coef.')
+```
+
+
+### spatial distribution of expression
+
+```{r}
+smoothTile <- function(Coord,X,N=3,grid=50,bw=2*sqrt(2),df=FALSE,center_weight=3) {
+  use <- Coord %>% as_tibble() %>% mutate(exp = X)
+  template <- expand_grid(
+    tibble(x = seq(1:grid)),
+    tibble(y = seq(1:grid))
+    )
+  D <- as.matrix(dist(template))
+  D <- D<=bw
+  tmp <- use %>%
+    mutate(
+      x = floor(grid*x/20480),
+      y = floor(grid*y/20480)
+      ) %>%
+    group_by(x,y) %>%
+    summarise(exp=mean(exp)) %>% ungroup() %>%
+    left_join(template,.,by=c("x","y"))
+  if(df){
+    return(tmp)
+  }else{
+    for (j in 1:N) {
+      tmp$exp <- lapply(1:nrow(template), function(x){
+        if(!is.na(tmp$exp[x])) tmp$exp[x] <- center_weight*tmp$exp[x]
+        idx <- which(D[x,])
+        exps <- tmp$exp[idx] %>% na.omit
+        if(!is.na(tmp$exp[x])) {
+          res <- sum(exps)/(length(exps)+center_weight-1)
+        }else{
+          res <- mean(exps)
+        }
+        return(res)
+        }) %>%
+        unlist()
+      tmp$exp <- ifelse(is.na(tmp$exp),min(tmp$exp,na.rm = T),tmp$exp)
+    }
+  return(tmp)
+  }
+}
+
+exps1 <- X[grep('d3-r1',rownames(X)),]
+coord1 <- Metaum %>% filter(day=='d3',rep=='r1') %>% select(Cell,x,y) %>% tib2df()
+p21 <- smoothTile(coord1,exps1[rownames(coord1),'p21'],N = 3,center_weight = 3,bw = 2*sqrt(2),grid = 50)
+patm <- smoothTile(coord1,exps1[rownames(coord1),'pATM'],N = 3,center_weight = 3,bw = 2*sqrt(2),grid = 50)
+notch <- smoothTile(coord1,exps1[rownames(coord1),'NOTCH1'],N = 3,center_weight = 3,bw = 2*sqrt(2),grid = 50)  
+```
+
+```{r}
+p21patm <- inner_join(
+  p21 %>% dplyr::rename(p21 = exp),
+  patm %>% dplyr::rename(pATM = exp),
+  by = c("x","y")
+  ) %>%
+  mutate(
+    p21 = (p21-min(p21))/max(p21-min(p21)),
+    pATM = (pATM-min(pATM))/max(pATM-min(pATM)),
+    log2FC = log2(p21/pATM)
+    )
+
+p21_ <- p21 %>%
+  ggplot(aes(x,y,fill = scale(exp))) + geom_tile() + coord_fixed() + 
+  scale_fill_gradient2(low='white',mid='white',high='green') +
+  theme_void() + labs(fill='p21')
+patm_ <- patm %>%
+  ggplot(aes(x,y,fill = scale(exp))) + geom_tile() + coord_fixed() + 
+  scale_fill_gradient2(low='white',mid='white',high='blue')+
+  theme_void() + labs(fill='pATM')
+p21patm_ <- p21patm %>%
+  mutate(
+    log2FC = ifelse(log2FC < -2.5,-2.5,log2FC),
+    log2FC = ifelse(log2FC > 2.5,2.5,log2FC)) %>%
+  ggplot(aes(x,y,fill = log2FC)) + geom_tile() + coord_fixed() + 
+  scale_fill_gradient2(low='blue',mid='white',high='green',midpoint = 0) +
+  theme_void()
+{{p21_/patm_}|p21patm_} + patchwork::plot_layout(guides='collect') & theme(legend.position = 'bottom')
+```
+
+
+```{r}
+p21notch <- inner_join(
+  notch %>% dplyr::rename(NOTCH1 = exp),
+  patm %>% dplyr::rename(pATM = exp),
+  by = c("x","y")
+  ) %>%
+  mutate(
+    NOTCH1 = (NOTCH1-min(NOTCH1))/max(NOTCH1-min(NOTCH1)),
+    pATM = (pATM-min(pATM))/max(pATM-min(pATM)),
+    log2FC = log2(NOTCH1/pATM)
+    )
+
+notch_ <- notch %>%
+  ggplot(aes(x,y,fill = scale(exp))) + geom_tile() + coord_fixed() + 
+  scale_fill_gradient2(low='white',mid='white',high='red') +
+  theme_void() + 
+  labs(fill='NOTCH1')
+p21notch_ <- p21notch %>%
+  mutate(
+    log2FC = ifelse(log2FC < -2.5,-2.5,log2FC),
+    log2FC = ifelse(log2FC > 2.5,2.5,log2FC)) %>%
+  ggplot(aes(x,y,fill = log2FC)) + geom_tile() + coord_fixed() + scale_fill_gradient2(low='blue',mid='white',high='red',midpoint = 0) + theme_void()
+{{notch_/patm_}|p21notch_} + patchwork::plot_layout(guides='collect') & theme(legend.position = 'bottom')
+```
+
+```{r}
+sessionInfo()
+```
+
+

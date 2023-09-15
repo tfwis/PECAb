@@ -1,0 +1,196 @@
+---
+title: "2_IMR90_56plex"
+output: html_notebook
+---
+
+Down stream analysis of the dataset '2_IMR90_56plex'
+
+## setup
+
+```{r setup}
+library(ggforce)
+library(tidyverse)
+```
+
+```{r}
+dcolor <- ggsci::scale_color_d3('category20')
+dfill <- ggsci::scale_fill_d3('category20')
+ccolor <- viridis::scale_color_viridis()
+style <- function(x,color,method='UMAP',axis=c(1,2),Theme=NULL,
+                  axis.text=FALSE,axis.title=FALSE,coord_fix =TRUE,
+                  palette=TRUE,title=NULL,
+                  legend=TRUE,scale_color_log10=FALSE,
+                  guide_pointSize=2.5,...) {
+  axis <- paste0(method,axis)
+  if(is.null(Theme)) Theme <- theme_bw
+  g <- ggplot() + Theme()
+  g <- g + geom_point(aes_(x=as.name(axis[1]),y=as.name(axis[2]),color=as.name(color)),x,...)
+  
+  if(coord_fix) {
+    g <- g + coord_fixed()
+  }
+  if(!axis.text) {
+    g <- g + theme(axis.text = element_blank(),axis.ticks = element_blank())
+  }
+  if(!axis.title) {
+    g <- g + theme(axis.title = element_blank())
+  }
+  if(is.null(title)) {
+    g <- g + ggtitle(method) 
+  }else if(!is.na(title)) {
+    g <- g + ggtitle(title) 
+  }
+  if(!legend) g <- g + theme(legend.position = 'none')
+  
+  if(scale_type(as.matrix(x[,color]))=='discrete' & !is.null(guide_pointSize)) {
+    g <- g + guides(color = guide_legend(override.aes = list(size=guide_pointSize)))
+  }
+  
+  if(palette) {
+    if(scale_type(as.matrix(x[,color]))=='discrete') {
+      g <- g + ggsci::scale_color_d3('category20')
+    }else{
+      if(scale_color_log10){
+        g <- g + viridis::scale_color_viridis(trans='log10')
+      }else{
+        g <- g + viridis::scale_color_viridis()
+      }
+    }
+  }
+  return(g)
+}
+tib2df <- function(tib,RowNames=1) {
+  rn <- pull(tib,all_of(RowNames))
+  df <- tib %>%
+    select(-RowNames) %>%
+    as.data.frame()
+  rownames(df) <- rn
+  return(df)
+}
+```
+
+
+##  load data
+
+```{r}
+data <- tibble(
+  path = list.files('2_IMR90_56plex/Raw/',full.names = T),
+  sampleName = c('r1', 'r2')
+  ) %>%
+  mutate(
+    metric = map(path,~{
+      .x %>%
+        read_csv(show_col_types=F) %>% 
+        unite(cell,tileID,cellID,sep = '-',remove = F)
+      }),
+    IF = map(metric,~{.x[,-(2:8)]}),
+    meta = map2(metric,IF,~{
+      .x[,1:8] %>%
+        unite(cell,tileID,cellID,sep = '-',remove = F) %>%
+        mutate(totalExp = rowSums(.y[,-1]))
+      }),
+    ) %>%
+  select(-path,-metric)
+```
+
+
+## Quality check & control
+
+```{r}
+data %>%
+  select(-IF) %>% unnest(meta) %>%
+  ggplot(aes(x,y,color=sampleName)) +
+    theme_void() +
+    geom_point(size=.5) + dcolor +
+    facet_grid(~sampleName) + coord_fixed()
+```
+
+
+```{r}
+data %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalExp)) + geom_violin() + geom_boxplot()
+```
+
+```{r}
+dataf <- data %>%
+  mutate(
+    idx = map2(meta,sampleName,~{.x$totalExp > 0.2}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]})
+    ) %>%
+  mutate(
+    idx = map2(meta,sampleName,~{.x$totalExp < 0.45}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]})
+    ) %>%
+  mutate(
+    idx = map(IF,~{rowSums(.x[,-1]==0) == 0}),
+    IF = map2(IF,idx,~{.x[.y,]}),
+    meta = map2(meta,idx,~{.x[.y,]}),
+    nCell = map(idx,sum) %>% unlist()
+    ) %>%
+  select(-idx)
+
+dataf %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  ggplot(aes(sampleName,totalExp)) + 
+  geom_violin() + geom_boxplot()
+```
+
+```{r}
+dataf %>%  
+  ggplot(aes(sampleName,nCell)) + 
+  theme_classic() +
+  geom_bar(stat='identity') +
+  scale_x_discrete(limits=rev) +
+  theme(axis.title.y = element_blank()) +  
+  coord_flip() + theme(aspect.ratio = .35) 
+```
+
+```{r}
+X <- dataf %>% 
+  select(sampleName,IF) %>% unnest(IF) %>% 
+  unite(Cell,sampleName,cell,sep = '-') %>%
+  tib2df() %>% scale() %>% asinh()
+p <- prcomp(X)
+screeplot(p,type='l',n=30)
+```
+
+```{r}
+total <- bind_rows(dataf$meta) %>% pull(totalExp) 
+cor(p$x[,1:30],total) %>%
+  plot(xlab = 'PC',ylab = 'CorCoef_vsTotalExp')
+```
+
+```{r}
+um <- uwot::umap(p$x[,(2:6)],n_neighbors = 15,min_dist = 0.3,metric = 'cosine')
+Metaum <- dataf %>%
+  select(sampleName,meta) %>% unnest(meta) %>%
+  unite(Cell,sampleName,cell,sep = '-',remove = F) %>%
+  mutate(UMAP1 = um[,1],UMAP2 = um[,2])
+style(Metaum,'sampleName',size=.6,title=NA)
+```
+
+```{r}
+tmp <- dataf %>% select(sampleName,IF) %>% unnest(IF)
+idx <- with(tmp,model.matrix(~0+sampleName))
+colnames(idx) <- sub("sampleName","",colnames(idx))
+avgmat <- tmp[,-(1:2)] %>% as.matrix() %>% t %>% {t(.%*%idx)/colSums(idx)} %>% t 
+
+library(ggrepel)
+avgmat %>%
+  as_tibble(rownames = 'Prot') %>%
+  ggplot(aes(r1,r2,label = Prot)) + theme_bw() +
+  geom_point() + 
+  geom_smooth(method = 'lm') + 
+  geom_text_repel() +
+  coord_fixed() + labs(x='rep1',y='rep2') +
+  theme(panel.grid.minor = element_blank())
+```
+
+```{r}
+sessionInfo()
+```
+
+
